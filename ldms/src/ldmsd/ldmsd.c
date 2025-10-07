@@ -698,15 +698,6 @@ int ldmsd_set_register(ldms_set_t set, const char *cfg_name)
 	s->set = set;
 	s->sampler = samp;
 
-	rc = ldmsd_set_update_hint_set(set, samp->sample_interval_us, samp->sample_offset_us);
-	if (rc) {
-		ovis_log(NULL, OVIS_LINFO,
-			 "Error %d setting the set hint data %ld:%ld "
-			 "for the set '%s'.\n",
-			 rc,
-			 samp->sample_interval_us, samp->sample_offset_us,
-			 ldms_set_instance_name_get(set));
-	}
 	LIST_INSERT_HEAD(&samp->set_list, s, entry);
 	ldmsd_sampler_find_put(samp);
 	return 0;
@@ -723,7 +714,7 @@ void ldmsd_set_deregister(const char *inst_name, const char *cfg_name)
 	const char *set_name;
 
 	if (!samp) {
-		ovis_log(NULL, OVIS_LERROR,
+		ovis_log(NULL, OVIS_LINFO,
 			"Dregistering set name '%s' failed because the "
 			"sampler config '%s' does not exist.\n",
 			inst_name, cfg_name);
@@ -2050,6 +2041,9 @@ int main(int argc, char *argv[])
 		}
 	}
 
+	/* Disable message traffic by default. */
+	ldms_msg_disable();
+
 	/* Process cmd-line options in config files */
 	opterr = 0;
 	optind = 0;
@@ -2082,22 +2076,25 @@ int main(int argc, char *argv[])
 		}
 	}
 
+	/* Process all priority configuration commands. */
 	int lln;
-	while ((conf_str = TAILQ_FIRST(&yamlfile_list))) {
-		/* yamlfilename_list and yamlfile_list are parallel by construction */
+	conf_str = TAILQ_FIRST(&yamlfile_list);
+	ypath = TAILQ_FIRST(&yamlfilename_list);
+	/* yamlfilename_list and yamlfile_list are parallel by construction */
+	while (conf_str) {
 		lln = -1;
-		struct ldmsd_str_ent *file_str =
-			TAILQ_FIRST(&yamlfilename_list);
-		char *yf = file_str->str;
 		ret = process_config_str(conf_str->str, &lln, 1);
 		if (ret) {
 			char errstr[128];
 			snprintf(errstr, sizeof(errstr),
 				"Error %d processing configuration file '%s'",
-				ret, yf);
+				ret, ypath->str);
 			ldmsd_str_list_destroy(&yamlfile_list);
+			ldmsd_str_list_destroy(&yamlfilename_list);
 			cleanup(ret, errstr);
 		}
+		conf_str = TAILQ_NEXT(conf_str, entry);
+		ypath = TAILQ_NEXT(ypath, entry);
 	}
 	while ((cpath = TAILQ_FIRST(&cfgfile_list))) {
 		lln = -1;

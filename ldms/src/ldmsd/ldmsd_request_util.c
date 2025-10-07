@@ -103,6 +103,7 @@ struct req_str_id req_str_id_table[] = {
 	{  "metric_sets_default_authz", LDMSD_SET_DEFAULT_AUTHZ_REQ  },
 	{  "msg_client_stats",   LDMSD_MSG_CLIENT_STATS_REQ  },
 	{  "msg_disable",        LDMSD_MSG_DISABLE_REQ  },
+	{  "msg_enable",	 LDMSD_MSG_ENABLE_REQ  },
 	{  "msg_stats",          LDMSD_MSG_STATS_REQ  },
 	{  "oneshot",            LDMSD_ONESHOT_REQ  },
 	{  "option",             LDMSD_CMDLINE_OPTIONS_SET_REQ  },
@@ -145,6 +146,7 @@ struct req_str_id req_str_id_table[] = {
 	{  "stop",               LDMSD_PLUGN_STOP_REQ  },
 	{  "stream_client_dump", LDMSD_STREAM_CLIENT_DUMP_REQ  },
 	{  "stream_disable",     LDMSD_STREAM_DISABLE_REQ  },
+	{  "stream_enable",      LDMSD_STREAM_ENABLE_REQ  },
 	{  "stream_status",      LDMSD_STREAM_STATUS_REQ  },
 	{  "strgp_add",          LDMSD_STRGP_ADD_REQ  },
 	{  "strgp_del",          LDMSD_STRGP_DEL_REQ  },
@@ -372,6 +374,10 @@ const char *ldmsd_req_id2str(enum ldmsd_request req_id)
 	case LDMSD_STREAM_NEW_REQ : return "STREAM_NEW_REQ";
 	case LDMSD_STREAM_STATUS_REQ : return "STREAM_DIR_REQ";
 	case LDMSD_STREAM_DISABLE_REQ : return "STREAM_DISABLE_REQ";
+
+	case LDMSD_MSG_DISABLE_REQ : return "MSG_DISABLE_REQ";
+	case LDMSD_MSG_ENABLE_REQ : return "MSG_ENABLE_REQ";
+
 	default: return "UNKNOWN_REQ";
 	}
 }
@@ -516,8 +522,7 @@ int __ldmsd_parse_generic(struct ldmsd_parse_ctxt *ctxt)
 	rc = 0;
 out:
 	ctxt->av = av;
-	if (dummy)
-		free(dummy);
+	free(dummy);
 	return rc;
 }
 
@@ -575,10 +580,8 @@ int __ldmsd_parse_plugin_config(struct ldmsd_parse_ctxt *ctxt)
 				    &ctxt->request,
 				    &ctxt->request_sz);
 out:
-	if (tmp)
-		free(tmp);
-	if (dummy)
-		free(dummy);
+	free(tmp);
+	free(dummy);
 	return rc;
 }
 
@@ -627,10 +630,8 @@ int __ldmsd_parse_env(struct ldmsd_parse_ctxt *ctxt)
 				    &ctxt->request,
 				    &ctxt->request_sz);
 out:
-	if (tmp)
-		free(tmp);
-	if (dummy)
-		free(dummy);
+	free(tmp);
+	free(dummy);
 	return rc;
 }
 
@@ -713,10 +714,8 @@ int __ldmsd_parse_listen_req(struct ldmsd_parse_ctxt *ctxt)
 	}
 
 out:
-	if (tmp)
-		free(tmp);
-	if (dummy)
-		free(dummy);
+	free(tmp);
+	free(dummy);
 	return rc;
 }
 
@@ -770,10 +769,8 @@ int __ldmsd_parse_auth_add_req(struct ldmsd_parse_ctxt *ctxt)
 	}
 
 out:
-	if (tmp)
-		free(tmp);
-	if (dummy)
-		free(dummy);
+	free(tmp);
+	free(dummy);
 	return rc;
 }
 
@@ -787,16 +784,9 @@ int __ldmsd_parse_cmdline_req(struct ldmsd_parse_ctxt *ctxt)
 int __ldmsd_parse_bridge_add_req(struct ldmsd_parse_ctxt *ctxt)
 {
 	char *av = ctxt->av;
-	size_t len = strlen(av) + 2; /* tmp is padded with trailing blank during formatting */
-	size_t cnt = 0;
-	char *tmp, *name, *value, *ptr, *dummy;
+	char *name, *value, *ptr, *dummy;
 	int rc = 0;
 	dummy = NULL;
-	tmp = malloc(len);
-	if (!tmp) {
-		rc = ENOMEM;
-		goto out;
-	}
 	av = strtok_r(av, __ldmsd_cfg_delim, &ptr);
 	while (av) {
 		ctxt->av = av;
@@ -823,22 +813,8 @@ int __ldmsd_parse_bridge_add_req(struct ldmsd_parse_ctxt *ctxt)
 	rc = add_attr_from_attr_str("type", "bridge",
 				    &ctxt->request,
 				    &ctxt->request_sz);
-	if (rc)
-		goto out;
-
-	if (cnt) {
-		tmp[cnt-1] = '\0'; /* Replace the last ' ' with '\0' */
-		/* Add an attribute of type 'STRING' */
-		rc = add_attr_from_attr_str(NULL, tmp,
-					    &ctxt->request,
-					    &ctxt->request_sz);
-	}
-
-out:
-	if (tmp)
-		free(tmp);
-	if (dummy)
-		free(dummy);
+ out:
+	free(dummy);
 	return rc;
 }
 
@@ -899,10 +875,8 @@ int __ldmsd_parse_default_auth_req(struct ldmsd_parse_ctxt *ctxt)
 	}
 	rc = 0;
 out:
-	if (tmp)
-		free(tmp);
-	if (dummy)
-		free(dummy);
+	free(tmp);
+	free(dummy);
 	return rc;
 }
 
@@ -910,16 +884,10 @@ out:
 int __ldmsd_parse_advertiser_add_req(struct ldmsd_parse_ctxt *ctxt)
 {
 	char *av = ctxt->av;
-	size_t len = strlen(av) + 2; /* tmp is padded with trailing blank during formatting */
-	size_t cnt = 0;
-	char *tmp, *name, *value, *ptr, *dummy;
+	char *name, *value, *ptr, *dummy;
 	int rc = 0;
 	dummy = NULL;
-	tmp = malloc(len);
-	if (!tmp) {
-		rc = ENOMEM;
-		goto out;
-	}
+
 	av = strtok_r(av, __ldmsd_cfg_delim, &ptr);
 	while (av) {
 		ctxt->av = av;
@@ -946,22 +914,8 @@ int __ldmsd_parse_advertiser_add_req(struct ldmsd_parse_ctxt *ctxt)
 	rc = add_attr_from_attr_str("type", "advertiser",
 				    &ctxt->request,
 				    &ctxt->request_sz);
-	if (rc)
-		goto out;
-
-	if (cnt) {
-		tmp[cnt-1] = '\0'; /* Replace the last ' ' with '\0' */
-		/* Add an attribute of type 'STRING' */
-		rc = add_attr_from_attr_str(NULL, tmp,
-					    &ctxt->request,
-					    &ctxt->request_sz);
-	}
-
-out:
-	if (tmp)
-		free(tmp);
-	if (dummy)
-		free(dummy);
+ out:
+	free(dummy);
 	return rc;
 }
 
@@ -1125,8 +1079,7 @@ err:
 	errno = rc;
 	free(dummy);
 	ldmsd_req_array_free(req_array);
-	if (ctxt.request)
-		free(ctxt.request);
+	free(ctxt.request);
 	return NULL;
 }
 

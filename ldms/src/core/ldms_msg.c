@@ -94,8 +94,8 @@ static ovis_log_t __ldms_msg_log = NULL; /* see __ldms_msg_init() below */
 
 static int __msg_stats_level = 1;
 
-/* Disable message support by default */
-int ldms_msg_enabled = 0;
+/* Initially enabled, see ldms_msg_disable/ldms_msg_enable */
+int ldms_msg_enabled = 1;
 
 struct __msg_event_s {
 	struct ldms_msg_event_s pub;
@@ -218,10 +218,10 @@ static int __part_send(struct ldms_rail_ep_s *rep,
 	goto fill_req;
 
  out:
-	if (req)
-		free(req);
 	if (req->msg_part.more != 0)
 		va_end(ap);
+	if (req)
+		free(req);
 	return rc;
 }
 
@@ -1738,6 +1738,7 @@ int __src_stats_rbt_copy(struct rbt *t0, struct rbt *t1, int is_reset)
 	return 0;
  err_0:
 	__src_stats_rbt_purge(t1);
+	free(s1);
 	return rc;
 }
 
