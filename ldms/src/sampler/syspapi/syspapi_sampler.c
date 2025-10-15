@@ -493,9 +493,9 @@ syspapi_open(struct syspapi_metric_list *mlist)
 				}
 			}
 		} else { // PERF_UNCORE
-			// For UNCORE, we open a single event for the entire system (-1 CPU)
+			// For UNCORE, we open a single event for the entire system (0 CPU)
 			// The event will be a "group leader" and collect system-wide data.
-			m->pfd[0] = perf_event_open(&m->attr, -1, -1, -1, 0);
+			m->pfd[0] = perf_event_open(&m->attr, -1, 0, -1, 0);
 			if (m->pfd[0] < 0) {
 				rc = errno;
 				syspapi_open_error(m, rc);
