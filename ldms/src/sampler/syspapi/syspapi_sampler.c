@@ -72,59 +72,57 @@
 
 #include "ovis_json/ovis_json.h"
 
-// Define the sampler name
 #define SAMP "syspapi_sampler"
 
-// Global variables for the sampler
-static int NCPU = 0;              // Number of CPUs on the system
-static ldms_set_t set = NULL;     // The LDMS metric set to store data
-static int metric_offset;         // Offset for metric indices in the set
-static base_data_t base;          // Base sampler data structure
-static int cumulative = 0;        // Flag to indicate if counters should be cumulative (1) or reset after read (0)
-static int auto_pause = 1;        // Flag to automatically pause/resume sampling based on PAPI task notifications
+static int NCPU = 0; /* Number of CPUs on the system */
+static ldms_set_t set = NULL; /* The LDMS metric set to store data */
+static int metric_offset; /* Offset for metric indices in the set */
+static base_data_t base; /* Base sampler data structure */
+static int cumulative = 0; /* Flag to indicate if counters should be cumulative (1) or reset after read (0) */
+static int auto_pause = 1; /* Flag to automatically pause/resume sampling based on PAPI task notifications */
 
-static ldmsd_stream_client_t syspapi_client = NULL; // Client for subscribing to LDMSD streams
-static ovis_log_t mylog;                              // Logger for the sampler
+static ldmsd_stream_client_t syspapi_client = NULL;
+static ovis_log_t mylog;
 
-// The event type is determined during initialization
+/* The event type is determined during initialization */
 typedef enum {
 	PERF_CORE,
 	PERF_UNCORE
 } perf_event_type;
 
-// Structure to hold information about a PAPI metric
 typedef struct syspapi_metric_s {
-	TAILQ_ENTRY(syspapi_metric_s) entry;  // Entry for the tail queue
-	int midx;                             // Metric index in the LDMS set
-	int init_rc;                          // Initialization return code (0 if successful)
-	struct perf_event_attr attr;          // perf_event attributes for the metric
-	char papi_name[256];                  // PAPI event name (e.g., "PAPI_TOT_CYC")
-	char pfm_name[1024];                  // Perfmon event name (PAPI native name)
-	perf_event_type type;                 // type of event (core or uncore)
-	int pfd[];                            // Array of perf_event file descriptors, one for each CPU
+	TAILQ_ENTRY(syspapi_metric_s) entry; /* Entry for the tail queue */
+	int midx; /* Metric index in the set */
+	int init_rc; /* perf_event_open() return code (0 if successful) */
+	struct perf_event_attr attr; /* perf_event attributes for the metric */
+	char papi_name[256]; /* PAPI event name (e.g., "PAPI_TOT_CYC") */
+	char pfm_name[1024]; /* Perfmon event name (PAPI native name) */
+	perf_event_type type; /* type of event (core or uncore) */
+	int pfd[]; /* Array of perf_event file descriptors */
 } *syspapi_metric_t;
 
 TAILQ_HEAD(syspapi_metric_list, syspapi_metric_s);
 static struct syspapi_metric_list mlist = TAILQ_HEAD_INITIALIZER(mlist);
 
-// Mutex for protecting access to shared data, like the metric list and sampling state.
+/* The mutex for `sample()` and syspapi state change (e.g. stream handling). */
 pthread_mutex_t syspapi_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-// Flags to manage the sampler's state
+/* Flags to manage the sampler's state */
 #define  SYSPAPI_PAUSED      0x1
 #define  SYSPAPI_OPENED      0x2
 #define  SYSPAPI_CONFIGURED  0x4
 
 int syspapi_flags = 0;
 
-// Helper macros for managing flags
+/* Helper macros for managing flags */
 #define FLAG_ON(var, flag)    (var) |= (flag)
 #define FLAG_OFF(var, flag)   (var) &= (~flag)
 #define FLAG_CHECK(var, flag) ((var) & (flag))
 
 /*
  * create_metric_set: Create a new LDMS metric set based on the metrics
- * in the global `mlist`.
+ * in the global `mlist`. For `m` in `mlist`, `m->midx` is the
+ * metric index in the set.
  *
  * @param base: The base sampler data structure.
  * @return 0 on success, or an errno value on failure.
@@ -136,7 +134,6 @@ create_metric_set(base_data_t base)
 	int rc;
 	syspapi_metric_t m;
 
-	// Create the base schema
 	schema = base_schema_new(base);
 	if (!schema) {
 		ovis_log(mylog, OVIS_LERROR,
@@ -146,26 +143,29 @@ create_metric_set(base_data_t base)
 		goto err;
 	}
 
-	// Get the current number of metrics in the schema. New metrics will be added from this offset.
+	/* Get the current number of metrics in the schema. New metrics will be
+	 * added from this offset.
+	 */
 	metric_offset = ldms_schema_metric_count_get(schema);
-	// Iterate through the list of PAPI metrics
 	TAILQ_FOREACH(m, &mlist, entry) {
-		// Add an array of unsigned 64-bit integers to the schema for each metric.
-		// The array size is NCPU, to store a value for each CPU.
-		// Use the PAPI metric name as the metric name in LDMS.
-		// The array size depends on the event type (NCPU for core, 1 for uncore)
+		/* Add an array of unsigned 64-bit integers to the schema for each
+		 * metric.
+		 * The array size is NCPU, to store a value for each CPU.
+		 * Use the PAPI metric name as the metric name in LDMS.
+		 * The array size depends on the event type (NCPU for core, 1 for
+		 * uncore)
+		 */
 		int arr_size = (m->type == PERF_CORE) ? NCPU : 1;
 		rc = ldms_schema_metric_array_add(schema, m->papi_name,
 						  LDMS_V_U64_ARRAY, arr_size);
 		if (rc < 0) {
-			rc = -rc; // rc == -errno
+			rc = -rc; /* rc == -errno */
 			goto err;
 		}
-		// Store the index of the newly added metric array
+		/* Store the index of the newly added metric array */
 		m->midx = rc;
 	}
 
-	// Create the actual metric set from the schema
 	set = base_set_new(base);
 	if (!set) {
 		rc = errno;
@@ -201,8 +201,8 @@ usage(ldmsd_plug_handle_t handle)
 }
 
 /*
- * syspapi_metric_init: Initializes a single PAPI metric by converting its PAPI name
- * to a perfmon name and then to a `perf_event_attr` structure.
+ * syspapi_metric_init: Initializes a single PAPI metric by converting its PAPI
+ * name to a perfmon name and then to a `perf_event_attr` structure.
  *
  * @param m: A pointer to the `syspapi_metric_s` structure to initialize.
  * @param papi_name: The PAPI event name string.
@@ -217,19 +217,19 @@ syspapi_metric_init(syspapi_metric_t m, const char *papi_name)
 	const PAPI_component_info_t *comp_info;
 	const char *pfm_name;
 
-	// Copy the PAPI name into the metric structure
+	/* Copy the PAPI name into the metric structure */
 	len = snprintf(m->papi_name, sizeof(m->papi_name), "%s", papi_name);
 	if (len >= sizeof(m->papi_name)) {
 		ovis_log(mylog, OVIS_LERROR, "event name too long: %s\n", papi_name);
 		return ENAMETOOLONG;
 	}
 	m->midx = -1;
-	// Initialize perf_event file descriptors to -1
+	/* Initialize perf_event file descriptors to -1 */
 	for (i = 0; i < NCPU; i++) {
 		m->pfd[i] = -1;
 	}
 
-	// Get the perfmon name from the PAPI name
+	/* Get the perfmon name from the PAPI name */
 	rc = PAPI_event_name_to_code((char*)papi_name, &papi_code);
 	if (rc != PAPI_OK) {
 		ovis_log(mylog, OVIS_LERROR, "PAPI_event_name_to_code for %s failed, "
@@ -243,7 +243,6 @@ syspapi_metric_init(syspapi_metric_t m, const char *papi_name)
 		return -1;
 	}
 	comp_info = PAPI_get_component_info(papi_info.component_index);
-	// Check if the event belongs to the `perf_event` or `perf_event_uncore` components
 	if (strcmp("perf_event", comp_info->name) == 0) {
 		m->type = PERF_CORE;
 	} else if (strcmp("perf_event_uncore", comp_info->name) == 0) {
@@ -254,7 +253,6 @@ syspapi_metric_init(syspapi_metric_t m, const char *papi_name)
 			m->papi_name);
 		return EINVAL;
 	}
-	// Check if the component is disabled
 	if (comp_info->disabled) {
 		ovis_log(mylog, OVIS_LERROR, "cannot initialize event %s, "
 			"PAPI component `%s` disabled, "
@@ -262,16 +260,16 @@ syspapi_metric_init(syspapi_metric_t m, const char *papi_name)
 			m->papi_name, comp_info->name, comp_info->disabled_reason);
 		return ENODATA;
 	}
-	// Handle PAPI preset events
+	/* Handle PAPI preset events */
 	if (IS_PRESET(papi_code)) {
-		// Check for derived events, which are not supported
+		/* Check for derived events, which are not supported */
 		if (strcmp(papi_info.derived, "NOT_DERIVED")) {
 			/* not NOT_DERIVED ==> this is a derived preset */
 			ovis_log(mylog, OVIS_LERROR, "Unsupported PAPI derived "
 					 "event: %s\n", m->papi_name);
 			return ENOTSUP;
 		}
-		// Get the native event name
+		/* Get the native event name */
 		switch (papi_info.count) {
 		case 0:
 			/* unavailable */
@@ -289,7 +287,7 @@ syspapi_metric_init(syspapi_metric_t m, const char *papi_name)
 				m->papi_name);
 			return ENOTSUP;
 		}
-	// Handle native PAPI events
+	/* Handle native PAPI events */
 	} else if (IS_NATIVE(papi_code)) {
 		pfm_name = papi_info.symbol;
 	} else {
@@ -298,15 +296,15 @@ syspapi_metric_init(syspapi_metric_t m, const char *papi_name)
 				"nor a native event.\n", m->papi_name);
 		return EINVAL;
 	}
-	// Copy the perfmon name into the metric structure
+	/* Copy the perfmon name into the metric structure */
 	snprintf(m->pfm_name, sizeof(m->pfm_name), "%s", pfm_name);
 
-	// Get the perf_event_attr from the perfmon name
+	/* Get the perf_event_attr from the perfmon name */
 	bzero(&m->attr, sizeof(m->attr));
 	m->attr.size = sizeof(m->attr);
 	pfm_perf_encode_arg_t pfm_arg = { .attr = &m->attr,
 					  .size = sizeof(pfm_arg) };
-	// Populate the perf_event_attr using the perfmon library
+	/* Populate the perf_event_attr using the perfmon library */
 	rc = pfm_get_os_event_encoding(pfm_name, PFM_PLM0|PFM_PLM3,
 				       PFM_OS_PERF_EVENT, &pfm_arg);
 	if (rc) {
@@ -321,25 +319,25 @@ syspapi_metric_init(syspapi_metric_t m, const char *papi_name)
  *
  * @param name: The PAPI event name.
  * @param mlist: The tail queue list to add the metric to.
- * @return 0 on success, or ENOMEM on allocation failure.
+ * @return 0 on success, or ENOMEM on allocation failure
  */
 static int
 syspapi_metric_add(const char *name, struct syspapi_metric_list *mlist)
 {
 	syspapi_metric_t m;
-	// Allocate memory for the metric structure, including the pfd array, based on NCPU. This is the max possible size.
+	/* Allocate memory for the metric structure, including the pfd array */
+	/* TODO: This will allocate space that is unused by uncore metrics. */
 	m = calloc(1, sizeof(*m) + NCPU*sizeof(int));
 	if (!m)
 		return ENOMEM;
-	// Initialize the metric
 	m->init_rc = syspapi_metric_init(m, name);
-	// Add the new metric to the tail queue
 	TAILQ_INSERT_TAIL(mlist, m, entry);
 	return 0;
 }
 
 /*
- * populate_mlist: Populates the metric list from a comma-separated string of event names.
+ * populate_mlist: Populates the metric list from a comma-separated string of
+ * event names.
  *
  * @param events: A comma-separated string of PAPI event names.
  * @param mlist: The tail queue list to populate.
@@ -350,10 +348,10 @@ populate_mlist(char *events, struct syspapi_metric_list *mlist)
 {
 	int rc;
 	char *tkn, *ptr;
-	// Tokenize the string by commas
+	/* Tokenize the string by commas */
 	tkn = strtok_r(events, ",", &ptr);
 	while (tkn) {
-		// Add each tokenized event name to the metric list
+		/* Add each tokenized event name to the metric list */
 		rc = syspapi_metric_add(tkn, mlist);
 		if (rc)
 			return rc;
@@ -372,14 +370,12 @@ purge_mlist(struct syspapi_metric_list *mlist)
 {
 	int i;
 	syspapi_metric_t m;
-	// Iterate through the list and free each metric
 	while ((m = TAILQ_FIRST(mlist))) {
 		TAILQ_REMOVE(mlist, m, entry);
-		// The loop needs to be NCPU here because the pfd array size is NCPU
+		/* TODO: Make this consider pfd of 1. */
 		for (i = 0; i < NCPU; i++) {
 			if (m->pfd[i] < 0)
 				continue;
-			// Close any open file descriptors
 			close(m->pfd[i]);
 		}
 		free(m);
@@ -397,11 +393,10 @@ syspapi_close(struct syspapi_metric_list *mlist)
 	syspapi_metric_t m;
 	int i;
 	TAILQ_FOREACH(m, mlist, entry) {
-		// Loop over NCPU for all events to close open FDs
+		/* TODO: Make this consider pfd of 1. */
 		for (i = 0; i < NCPU; i++) {
 			if (m->pfd[i] < 0)
 				continue;
-			// Disable and close the perf_event file descriptor
 			ioctl(m->pfd[i], PERF_EVENT_IOC_DISABLE, 0);
 			close(m->pfd[i]);
 			m->pfd[i] = -1;
@@ -410,7 +405,8 @@ syspapi_close(struct syspapi_metric_list *mlist)
 }
 
 /*
- * syspapi_open_error: Logs a user-friendly error message for perf_event_open failures.
+ * syspapi_open_error: Logs a user-friendly error message for perf_event_open
+ * failures.
  *
  * @param m: The metric that failed to open.
  * @param rc: The errno value from the failed call.
@@ -460,11 +456,10 @@ syspapi_open_error(syspapi_metric_t m, int rc)
 }
 
 /*
- * syspapi_open: Opens perf_event file descriptors for all metrics in the list,
- * one per CPU.
+ * syspapi_open: Opens perf_event file descriptors for all metrics in the list
  *
  * @param mlist: The tail queue list of metrics.
- * @return 0 on success, or an errno value on a critical failure (e.g., EMFILE).
+ * @return 0 on success, or an errno value on failure.
  */
 static int
 syspapi_open(struct syspapi_metric_list *mlist)
@@ -473,17 +468,17 @@ syspapi_open(struct syspapi_metric_list *mlist)
 	syspapi_metric_t m;
 
 	TAILQ_FOREACH(m, mlist, entry) {
-		if (m->init_rc) // Skip metrics that failed to initialize
+		if (m->init_rc) /* Skip metrics that failed to initialize */
 			continue;
 
 		if (m->type == PERF_CORE) {
 			for (i = 0; i < NCPU; i++) {
-				// Open the perf_event file descriptor for the specific CPU
+				/* Open the perf_event file descriptor for the specific CPU */
 				m->pfd[i] = perf_event_open(&m->attr, -1, i, -1, 0);
 				if (m->pfd[i] < 0) {
 					rc = errno;
 					syspapi_open_error(m, rc);
-					// A critical error like EMFILE requires a full stop.
+					/* A critical error like EMFILE requires a full stop. */
 					if (rc == EMFILE) {
 						syspapi_close(mlist);
 						return rc;
@@ -492,14 +487,14 @@ syspapi_open(struct syspapi_metric_list *mlist)
 					ovis_log(mylog, OVIS_LINFO, "%s on CPU %d successfully added\n", m->papi_name, i);
 				}
 			}
-		} else { // PERF_UNCORE
-			// For UNCORE, we open a single event for the entire system (0 CPU)
-			// The event will be a "group leader" and collect system-wide data.
+		} else { /* PERF_UNCORE */
+			/* For UNCORE, we open a single event for the entire system (0 CPU).
+			   The event will collect system-wide data. */
 			m->pfd[0] = perf_event_open(&m->attr, -1, 0, -1, 0);
 			if (m->pfd[0] < 0) {
 				rc = errno;
 				syspapi_open_error(m, rc);
-				// A critical error like EMFILE requires a full stop.
+				/* A critical error like EMFILE requires a full stop. */
 				if (rc == EMFILE) {
 					syspapi_close(mlist);
 					return rc;
@@ -531,7 +526,7 @@ handle_cfg_file(ldmsd_plug_handle_t handle, const char *cfg_file)
 	json_entity_t event;
 	json_entity_t schema;
 
-	// Open and read the entire file into a buffer
+	/* Open and read the entire file into a buffer */
 	fd = open(cfg_file, O_RDONLY);
 	if (fd < 0) {
 		rc = errno;
@@ -564,7 +559,7 @@ handle_cfg_file(ldmsd_plug_handle_t handle, const char *cfg_file)
 		off += rsz;
 	}
 
-	// Parse the JSON buffer
+	/* Parse the JSON buffer */
 	parser = json_parser_new(0);
 	if (!parser) {
 		rc = ENOMEM;
@@ -578,7 +573,7 @@ handle_cfg_file(ldmsd_plug_handle_t handle, const char *cfg_file)
 		goto out;
 	}
 
-	// Look for an optional "schema" key to override the schema name
+	/* Look for an optional "schema" key to override the schema name */
 	schema = json_attr_find(json, "schema");
 	if (schema) {
 		schema = json_attr_value(schema);
@@ -598,7 +593,7 @@ handle_cfg_file(ldmsd_plug_handle_t handle, const char *cfg_file)
 		}
 	}
 
-	// Get the "events" list from the JSON file
+	/* Get the "events" list from the JSON file */
 	events = json_attr_find(json, "events");
 	if (!events) {
 		ovis_log(mylog, OVIS_LERROR, "cfg_file parse error: `events` "
@@ -614,7 +609,9 @@ handle_cfg_file(ldmsd_plug_handle_t handle, const char *cfg_file)
 		goto out;
 	}
 
-	// Iterate through the list of event names and add them to the metric list
+	/* Iterate through the list of event names and add them to the metric
+	 * list
+	 */
 	event = json_item_first(events);
 	while (event) {
 		if (json_entity_type(event) != JSON_STRING_VALUE) {
@@ -631,7 +628,7 @@ handle_cfg_file(ldmsd_plug_handle_t handle, const char *cfg_file)
 	}
 
 out:
-	// Cleanup resources
+	/* Cleanup resources */
 	if (fd > -1)
 		close(fd);
 	if (buff)
@@ -644,8 +641,8 @@ out:
 }
 
 /*
- * config: Configures the syspapi sampler. This is the main configuration function
- * called by the LDMS daemon.
+ * config: Configures the syspapi sampler. This is the main configuration
+ * function called by the LDMS daemon.
  *
  * @param handle: The LDMSD plugin handle.
  * @param kwl: The keyword-value list (not used here).
@@ -669,8 +666,8 @@ config(ldmsd_plug_handle_t handle, struct attr_value_list *kwl,
 		goto out;
 	}
 
-	cfg_file = av_value(avl, "cfg_file"); // Get JSON config file path
-	events = av_value(avl, "events");     // Get comma-separated event list
+	cfg_file = av_value(avl, "cfg_file"); /* Get JSON config file path */
+	events = av_value(avl, "events");     /* Get comma-separated event list */
 
 	if (!events && !cfg_file) {
 		ovis_log(mylog, OVIS_LERROR, "`events` and `cfg_file` "
@@ -679,28 +676,28 @@ config(ldmsd_plug_handle_t handle, struct attr_value_list *kwl,
 		goto out;
 	}
 
-	// Initialize base sampler data
+	/* Initialize base sampler data */
 	base = base_config(avl, ldmsd_plug_cfg_name_get(handle), SAMP, mylog);
 	if (!base) {
 		rc = errno;
 		goto out;
 	}
 
-	// Handle events from a config file if specified
+	/* Handle events from a config file if specified */
 	if (cfg_file) {
 		rc = handle_cfg_file(handle, cfg_file);
 		if (rc)
 			goto err;
 	}
 
-	// Handle events from a direct string if specified
+	/* Handle events from a direct string if specified */
 	if (events) {
 		rc = populate_mlist(events, &mlist);
 		if (rc)
 			goto err;
 	}
 
-	// Get optional `auto_pause` and `cumulative` flags
+	/* Get optional `auto_pause` and `cumulative` flags */
 	value = av_value(avl, "auto_pause");
 	if (value) {
 		auto_pause = atoi(value);
@@ -711,7 +708,7 @@ config(ldmsd_plug_handle_t handle, struct attr_value_list *kwl,
 		cumulative = atoi(value);
 	}
 
-	// If not paused, open the perf_event file descriptors
+	/* If not paused, open the perf_event file descriptors */
 	if (!FLAG_CHECK(syspapi_flags, SYSPAPI_PAUSED)) {
 		/* state may be in SYSPAPI_PAUSED, and we won't open fd */
 		rc = syspapi_open(&mlist);
@@ -720,18 +717,19 @@ config(ldmsd_plug_handle_t handle, struct attr_value_list *kwl,
 		FLAG_ON(syspapi_flags, SYSPAPI_OPENED);
 	}
 
-	// Create the LDMS metric set
+	/* Create the LDMS metric set */
 	rc = create_metric_set(base);
 	if (rc) {
 		ovis_log(mylog, OVIS_LERROR, "failed to create a metric set.\n");
 		goto err;
 	}
-	// Mark the sampler as configured
+
+	/* Mark the sampler as configured */
 	FLAG_ON(syspapi_flags, SYSPAPI_CONFIGURED);
 	rc = 0;
 	goto out;
  err:
-	// Cleanup on error
+	/* Cleanup on error */
 	FLAG_OFF(syspapi_flags, SYSPAPI_CONFIGURED);
 	FLAG_OFF(syspapi_flags, SYSPAPI_OPENED);
 	purge_mlist(&mlist);
@@ -762,45 +760,47 @@ sample(ldmsd_plug_handle_t handle)
 	}
 
 	pthread_mutex_lock(&syspapi_mutex);
-	// Only sample if the perf_event file descriptors are open
+	/* Only sample if the perf_event file descriptors are open */
 	if (!FLAG_CHECK(syspapi_flags, SYSPAPI_OPENED))
 		goto out;
-	// Start the sampling process
+	/* Start the sampling process */
 	base_sample_begin(base);
 
-	// Iterate through all metrics
 	TAILQ_FOREACH(m, &mlist, entry) {
 		if (m->type == PERF_CORE) {
 			for (i = 0; i < NCPU; i++) {
 				v = 0;
 				if (m->pfd[i] >= 0) {
-					// Read the counter value from the perf_event file descriptor
+					/* Read the counter value from the perf_event file
+					 * descriptor
+					 */
 					rc = read(m->pfd[i], &v, sizeof(v));
 					if (rc <= 0)
 						continue;
-					// If not cumulative, reset the counter after reading
+					/* If not cumulative, reset the counter after reading */
 					if (!cumulative) {
 						ioctl(m->pfd[i], PERF_EVENT_IOC_RESET, 0);
 					}
 				}
-				// Store the value in the LDMS metric set
+				/* Store the value in the LDMS metric set */
 				ldms_metric_array_set_u64(set, m->midx, i, v);
 			}
-		} else { // PERF_UNCORE
+		} else { /* PERF_UNCORE */
 			v = 0;
 			if (m->pfd[0] >= 0) {
-				// Read the counter value from the perf_event file descriptor
+				/* Read the counter value from the perf_event file descriptor */
 				rc = read(m->pfd[0], &v, sizeof(v));
 				if (rc <= 0)
 					continue;
-				// If not cumulative, reset the counter after reading
+				/* If not cumulative, reset the counter after reading */
 				if (!cumulative) {
 					ioctl(m->pfd[0], PERF_EVENT_IOC_RESET, 0);
 				}
 			}
-			// Store the value in the LDMS metric set
-			// For UNCORE, we set the single value at index 0 of the array.
-			// The metric set size is already configured for size 1.
+			/* Store the value in the LDMS metric set.
+			 * For UNCORE, we set the single value at index 0 of the array.
+			 * The metric set size is already configured for size 1.
+			 */
 			ldms_metric_array_set_u64(set, m->midx, 0, v);
 		}
 	}
@@ -819,7 +819,7 @@ static void
 __pause()
 {
 	if (FLAG_CHECK(syspapi_flags, SYSPAPI_PAUSED))
-		return; // Already paused, do nothing
+		return; /* Already paused, do nothing */
 	FLAG_ON(syspapi_flags, SYSPAPI_PAUSED);
 	if (FLAG_CHECK(syspapi_flags, SYSPAPI_OPENED)) {
 		syspapi_close(&mlist);
@@ -835,9 +835,9 @@ static void
 __resume()
 {
 	if (!FLAG_CHECK(syspapi_flags, SYSPAPI_PAUSED))
-		return; // Not paused, do nothing
+		return; /* Not paused, do nothing */
 	FLAG_OFF(syspapi_flags, SYSPAPI_PAUSED);
-	// Only resume if the sampler was configured successfully
+	/* Only resume if the sampler was configured successfully */
 	if (FLAG_CHECK(syspapi_flags, SYSPAPI_CONFIGURED)) {
 		assert(0 == FLAG_CHECK(syspapi_flags, SYSPAPI_OPENED));
 		syspapi_open(&mlist);
@@ -907,8 +907,8 @@ __stream_cb(ldmsd_stream_client_t c, void *ctxt,
 }
 
 /*
- * constructor: The sampler's constructor. Initializes PAPI, gets the number of CPUs,
- * subscribes to a stream for remote control, and registers hooks for
+ * constructor: The sampler's constructor. Initializes PAPI, gets the number of
+ * CPUs, subscribes to a stream for remote control, and registers hooks for
  * task-based pausing.
  *
  * @param handle: The LDMSD plugin handle.
@@ -918,21 +918,20 @@ static int constructor(ldmsd_plug_handle_t handle)
 {
 	int rc;
 	mylog = ldmsd_plug_log_get(handle);
-	// Initialize the PAPI library
 	rc = PAPI_library_init(PAPI_VER_CURRENT);
 	if (rc < 0) {
 		ovis_log(mylog, OVIS_LERROR, "Error %d attempting to initialize "
 			     "the PAPI library.\n", rc);
 	}
-	// Get the number of online CPUs
+	/* Get the number of online CPUs */
 	NCPU = sysconf(_SC_NPROCESSORS_CONF);
-	// Subscribe to a stream for "pause" and "resume" commands
+	/* Subscribe to a stream for "pause" and "resume" commands */
 	syspapi_client = ldmsd_stream_subscribe("syspapi_stream", __stream_cb, NULL);
 	if (!syspapi_client) {
 		ovis_log(mylog, OVIS_LERROR, "failed to subscribe to 'syspapi_stream' "
 			     "stream, errno: %d\n", errno);
 	}
-	// Register hooks for automatic pausing/resuming
+	/* Register hooks for automatic pausing/resuming */
 	register_task_init_hook(__on_task_init);
 	register_task_empty_hook(__on_task_empty);
 
@@ -952,21 +951,20 @@ static void destructor(ldmsd_plug_handle_t handle)
 	if (set)
 		ldms_set_delete(set);
 	set = NULL;
-	// Purge the metric list and close all perf_event file descriptors
 	purge_mlist(&mlist);
 	FLAG_OFF(syspapi_flags, SYSPAPI_CONFIGURED);
 	FLAG_OFF(syspapi_flags, SYSPAPI_OPENED);
 	pthread_mutex_unlock(&syspapi_mutex);
-	// Close the LDMS stream client
 	if (syspapi_client) {
 		ldmsd_stream_close(syspapi_client);
 		syspapi_client = NULL;
 	}
-	// Shutdown the PAPI library
 	PAPI_shutdown();
 }
 
-// The main plugin interface structure, linking the sampler functions to LDMSD.
+/* The main plugin interface structure, linking the sampler functions to
+ * LDMSD.
+ */
 struct ldmsd_sampler ldmsd_plugin_interface = {
 	.base = {
 		.type = LDMSD_PLUGIN_SAMPLER,
