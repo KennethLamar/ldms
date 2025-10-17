@@ -104,7 +104,7 @@ typedef struct syspapi_metric_s {
 TAILQ_HEAD(syspapi_metric_list, syspapi_metric_s);
 static struct syspapi_metric_list mlist = TAILQ_HEAD_INITIALIZER(mlist);
 
-/* The mutex for `sample()` and syspapi state change (e.g. stream handling). */
+/* The mutex for `sample()` and syspapi state change (e.g. stream handling) */
 pthread_mutex_t syspapi_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* Flags to manage the sampler's state */
@@ -148,20 +148,20 @@ create_metric_set(base_data_t base)
 	 */
 	metric_offset = ldms_schema_metric_count_get(schema);
 	TAILQ_FOREACH(m, &mlist, entry) {
-		/* Add an array of unsigned 64-bit integers to the schema for each
-		 * metric.
-		 * The array size is NCPU, to store a value for each CPU.
-		 * Use the PAPI metric name as the metric name in LDMS.
-		 * The array size depends on the event type (NCPU for core, 1 for
-		 * uncore)
-		 */
-		int arr_size = (m->type == PERF_CORE) ? NCPU : 1;
-		rc = ldms_schema_metric_array_add(schema, m->papi_name,
-						  LDMS_V_U64_ARRAY, arr_size);
+		if (m->type == PERF_CORE) {
+			rc = ldms_schema_metric_array_add(schema, m->papi_name,
+											  LDMS_V_U64_ARRAY, NCPU);
+		} else if (m->type == PERF_UNCORE) {
+			rc = ldms_schema_metric_add(schema, m->papi_name, LDMS_V_U64);
+		} else {
+			return EINVAL;
+		}
+
 		if (rc < 0) {
 			rc = -rc; /* rc == -errno */
 			goto err;
 		}
+
 		/* Store the index of the newly added metric array */
 		m->midx = rc;
 	}
@@ -200,6 +200,56 @@ usage(ldmsd_plug_handle_t handle)
 		;
 }
 
+/**
+ * syspapi_get_metric_type: Determines if a PAPI event is CORE or UNCORE.
+ *
+ * @param papi_name: The PAPI event name string.
+ * @param type_out: A pointer to store the resulting perf_event_type.
+ * @return 0 on success, or a PAPI error code or errno value on failure.
+ */
+static int
+syspapi_get_metric_type(const char *papi_name, perf_event_type *type_out)
+{
+	int rc, papi_code;
+	PAPI_event_info_t papi_info;
+	const PAPI_component_info_t *comp_info;
+
+	rc = PAPI_event_name_to_code((char*)papi_name, &papi_code);
+	if (rc != PAPI_OK) {
+		ovis_log(mylog, OVIS_LERROR, "PAPI_event_name_to_code for %s failed, "
+				 "error: %d\n", papi_name, rc);
+		return -1;
+	}
+
+	rc = PAPI_get_event_info(papi_code, &papi_info);
+	if (rc != PAPI_OK) {
+		ovis_log(mylog, OVIS_LERROR, "PAPI_get_event_info for %s failed, "
+				 "error: %d\n", papi_name, rc);
+		return -1;
+	}
+
+	comp_info = PAPI_get_component_info(papi_info.component_index);
+	if (strcmp("perf_event", comp_info->name) == 0) {
+		*type_out = PERF_CORE;
+	} else if (strcmp("perf_event_uncore", comp_info->name) == 0) {
+		*type_out = PERF_UNCORE;
+	} else {
+		ovis_log(mylog, OVIS_LERROR, "event %s not supported, "
+			"only events in perf_event and perf_event_uncore are supported.\n",
+			papi_name);
+		return EINVAL;
+	}
+
+	if (comp_info->disabled) {
+		ovis_log(mylog, OVIS_LERROR, "cannot initialize event %s, "
+			"PAPI component `%s` disabled, reason: %s\n",
+			papi_name, comp_info->name, comp_info->disabled_reason);
+		return ENODATA;
+	}
+
+	return 0;
+}
+
 /*
  * syspapi_metric_init: Initializes a single PAPI metric by converting its PAPI
  * name to a perfmon name and then to a `perf_event_attr` structure.
@@ -224,10 +274,6 @@ syspapi_metric_init(syspapi_metric_t m, const char *papi_name)
 		return ENAMETOOLONG;
 	}
 	m->midx = -1;
-	/* Initialize perf_event file descriptors to -1 */
-	for (i = 0; i < NCPU; i++) {
-		m->pfd[i] = -1;
-	}
 
 	/* Get the perfmon name from the PAPI name */
 	rc = PAPI_event_name_to_code((char*)papi_name, &papi_code);
@@ -243,16 +289,6 @@ syspapi_metric_init(syspapi_metric_t m, const char *papi_name)
 		return -1;
 	}
 	comp_info = PAPI_get_component_info(papi_info.component_index);
-	if (strcmp("perf_event", comp_info->name) == 0) {
-		m->type = PERF_CORE;
-	} else if (strcmp("perf_event_uncore", comp_info->name) == 0) {
-		m->type = PERF_UNCORE;
-	} else {
-		ovis_log(mylog, OVIS_LERROR, "event %s not supported, "
-			"only events in perf_event and perf_event_uncore are supported.\n",
-			m->papi_name);
-		return EINVAL;
-	}
 	if (comp_info->disabled) {
 		ovis_log(mylog, OVIS_LERROR, "cannot initialize event %s, "
 			"PAPI component `%s` disabled, "
@@ -299,6 +335,15 @@ syspapi_metric_init(syspapi_metric_t m, const char *papi_name)
 	/* Copy the perfmon name into the metric structure */
 	snprintf(m->pfm_name, sizeof(m->pfm_name), "%s", pfm_name);
 
+	/* Initialize perf_event file descriptors to -1 */
+	if (m->type == PERF_CORE) {
+		for (i = 0; i < NCPU; i++) {
+			m->pfd[i] = -1;
+		}
+	} else { /* PERF_UNCORE */ 
+		m->pfd[0] = -1;
+	}
+
 	/* Get the perf_event_attr from the perfmon name */
 	bzero(&m->attr, sizeof(m->attr));
 	m->attr.size = sizeof(m->attr);
@@ -319,17 +364,28 @@ syspapi_metric_init(syspapi_metric_t m, const char *papi_name)
  *
  * @param name: The PAPI event name.
  * @param mlist: The tail queue list to add the metric to.
- * @return 0 on success, or ENOMEM on allocation failure
+ * @return 0 on success, or a PAPI error code or errno value on failure.
  */
 static int
 syspapi_metric_add(const char *name, struct syspapi_metric_list *mlist)
 {
 	syspapi_metric_t m;
-	/* Allocate memory for the metric structure, including the pfd array */
-	/* TODO: This will allocate space that is unused by uncore metrics. */
-	m = calloc(1, sizeof(*m) + NCPU*sizeof(int));
+	perf_event_type type;
+	size_t pfd_count;
+	int rc;
+
+	/* Determine the metric type to calculate allocation size */
+	rc = syspapi_get_metric_type(name, &type);
+	if (rc) {
+		return rc;
+	}
+	pfd_count = (type == PERF_CORE) ? NCPU : 1;
+	m = calloc(1, sizeof(*m) + pfd_count * sizeof(int));
 	if (!m)
 		return ENOMEM;
+
+	/* Perform the rest of the initialization */
+	m->type = type; /* Set the type before calling init */
 	m->init_rc = syspapi_metric_init(m, name);
 	TAILQ_INSERT_TAIL(mlist, m, entry);
 	return 0;
@@ -372,11 +428,16 @@ purge_mlist(struct syspapi_metric_list *mlist)
 	syspapi_metric_t m;
 	while ((m = TAILQ_FIRST(mlist))) {
 		TAILQ_REMOVE(mlist, m, entry);
-		/* TODO: Make this consider pfd of 1. */
-		for (i = 0; i < NCPU; i++) {
-			if (m->pfd[i] < 0)
+		if (m->type == PERF_CORE) {
+			for (i = 0; i < NCPU; i++) {
+				if (m->pfd[i] < 0)
+					continue;
+				close(m->pfd[i]);
+			}
+		} else { /* PERF_UNCORE */
+			if (m->pfd[0] < 0)
 				continue;
-			close(m->pfd[i]);
+			close(m->pfd[0]);
 		}
 		free(m);
 	}
@@ -393,13 +454,20 @@ syspapi_close(struct syspapi_metric_list *mlist)
 	syspapi_metric_t m;
 	int i;
 	TAILQ_FOREACH(m, mlist, entry) {
-		/* TODO: Make this consider pfd of 1. */
-		for (i = 0; i < NCPU; i++) {
-			if (m->pfd[i] < 0)
+		if (m->type == PERF_CORE) {
+			for (i = 0; i < NCPU; i++) {
+				if (m->pfd[i] < 0)
+					continue;
+				ioctl(m->pfd[i], PERF_EVENT_IOC_DISABLE, 0);
+				close(m->pfd[i]);
+				m->pfd[i] = -1;
+			}
+		} else { /* PERF_UNCORE */
+			if (m->pfd[0] < 0)
 				continue;
-			ioctl(m->pfd[i], PERF_EVENT_IOC_DISABLE, 0);
-			close(m->pfd[i]);
-			m->pfd[i] = -1;
+			ioctl(m->pfd[0], PERF_EVENT_IOC_DISABLE, 0);
+			close(m->pfd[0]);
+			m->pfd[0] = -1;
 		}
 	}
 }
@@ -478,7 +546,7 @@ syspapi_open(struct syspapi_metric_list *mlist)
 				if (m->pfd[i] < 0) {
 					rc = errno;
 					syspapi_open_error(m, rc);
-					/* A critical error like EMFILE requires a full stop. */
+					/* A critical error like EMFILE requires a full stop */
 					if (rc == EMFILE) {
 						syspapi_close(mlist);
 						return rc;
@@ -488,13 +556,13 @@ syspapi_open(struct syspapi_metric_list *mlist)
 				}
 			}
 		} else { /* PERF_UNCORE */
-			/* For UNCORE, we open a single event for the entire system (0 CPU).
+			/* For UNCORE, we open a single event for the entire system (CPU=0).
 			   The event will collect system-wide data. */
 			m->pfd[0] = perf_event_open(&m->attr, -1, 0, -1, 0);
 			if (m->pfd[0] < 0) {
 				rc = errno;
 				syspapi_open_error(m, rc);
-				/* A critical error like EMFILE requires a full stop. */
+				/* A critical error like EMFILE requires a full stop */
 				if (rc == EMFILE) {
 					syspapi_close(mlist);
 					return rc;
@@ -881,7 +949,6 @@ __on_task_empty()
  * @param ctxt: Extra context information (not used here).
  * @return 0 to continue processing.
  */
- // TODO: Update to match updated code.
 int __stream_cb(ldms_msg_event_t ev, void *ctxt)
 {
 	if (ev->type != LDMS_MSG_EVENT_RECV)
