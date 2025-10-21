@@ -865,11 +865,8 @@ sample(ldmsd_plug_handle_t handle)
 					ioctl(m->pfd[0], PERF_EVENT_IOC_RESET, 0);
 				}
 			}
-			/* Store the value in the LDMS metric set.
-			 * For UNCORE, we set the single value at index 0 of the array.
-			 * The metric set size is already configured for size 1.
-			 */
-			ldms_metric_array_set_u64(set, m->midx, 0, v);
+			/* Store the value in the LDMS metric set. */
+			ldms_metric_set_u64(set, m->midx, 0, v);
 		}
 	}
 
