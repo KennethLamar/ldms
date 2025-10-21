@@ -866,7 +866,7 @@ sample(ldmsd_plug_handle_t handle)
 				}
 			}
 			/* Store the value in the LDMS metric set. */
-			ldms_metric_set_u64(set, m->midx, 0, v);
+			ldms_metric_set_u64(set, m->midx, v);
 		}
 	}
 
